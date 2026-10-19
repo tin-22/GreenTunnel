@@ -479,6 +479,13 @@ and worked with it off. Each of these cost a wrong theory first.
    strings: server, bypass, PAC URL. And in PowerShell 5.1 an unquoted argument
    starting with `-` is split at its first dot — `-n=Microsoft.AAD.…` reaches the
    program as `-n=Microsoft .AAD.…` — so quote such arguments.
+6. **The query can fail where nothing else does.** A user's machine answered
+   `InternetQueryOption` with "The parameter is incorrect", which failed
+   `snapshot()` and so the whole start. Not reproduced here. A failed query now
+   decodes `DefaultConnectionSettings` directly (the layout above), and logs a
+   `warn` with the API's error. Separately, the option union must be 8 bytes but
+   only 4-byte aligned: a `long` member made it 16 bytes on x86, and a 32-bit
+   PowerShell then read every option back as zero.
 
 ## Verified
 

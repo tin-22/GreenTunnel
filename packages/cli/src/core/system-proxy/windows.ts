@@ -44,6 +44,11 @@ export class WindowsSystemProxy implements SystemProxyDriver {
 
   async snapshot(): Promise<SystemProxySnapshot> {
     const current = await queryProxy();
+    if (current.queryFailure.length > 0) {
+      this.#log.warn(
+        `WinINet refused the proxy query (${current.queryFailure}); read the stored record instead`,
+      );
+    }
     const [host = '', port = ''] = current.server.split(':');
 
     return {
@@ -149,13 +154,17 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32;
 
 public static class GtWinInet {
-  [StructLayout(LayoutKind.Explicit)]
+  // The C union also holds a FILETIME: 8 bytes, but only 4-byte aligned. A
+  // \`long\` member would be 8-byte aligned, making Option 16 bytes on x86 where
+  // WinINet expects 12 — every value then read back as zero.
+  [StructLayout(LayoutKind.Explicit, Size = 8)]
   public struct Value {
     [FieldOffset(0)] public int Int;
     [FieldOffset(0)] public IntPtr Ptr;
-    [FieldOffset(0)] public long FileTime;
   }
 
   [StructLayout(LayoutKind.Sequential)]
@@ -211,15 +220,47 @@ public static class GtWinInet {
   }
 
   static string Text(int id) {
-    IntPtr p = Run(new Option[] { Make(id, IntPtr.Zero) }, false)[0].V.Ptr;
+    IntPtr p;
+    try { p = Run(new Option[] { Make(id, IntPtr.Zero) }, false)[0].V.Ptr; }
+    catch (Win32Exception e) { throw new Win32Exception(e.NativeErrorCode, "option " + id + ": " + e.Message); }
     if (p == IntPtr.Zero) return "";
     string s = Marshal.PtrToStringUni(p);
     GlobalFree(p);
     return s;
   }
 
+  // The fifth element is empty, or why the API could not be used.
   public static string[] Get() {
-    return new string[] { Flags().ToString(), Text(SERVER), Text(BYPASS), Text(AUTOCONFIG_URL) };
+    try {
+      return new string[] { Flags().ToString(), Text(SERVER), Text(BYPASS), Text(AUTOCONFIG_URL), "" };
+    } catch (Win32Exception e) {
+      return FromRecord(e.Message);
+    }
+  }
+
+  // Some machines answer the query with "The parameter is incorrect" while
+  // the same API still accepts writes, and a failed read used to stop the
+  // tunnel from starting at all. The query only decodes this record, so read
+  // it directly: bytes 8-11 are the flags, then length-prefixed ASCII strings
+  // for the server, the bypass list and the PAC URL.
+  static string[] FromRecord(string why) {
+    byte[] r = Registry.GetValue(
+      @"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections",
+      "DefaultConnectionSettings", null) as byte[];
+    if (r == null || r.Length < 12) return new string[] { "1", "", "", "", why };
+    int at = 12;
+    string server = Field(r, ref at), bypass = Field(r, ref at), url = Field(r, ref at);
+    return new string[] { BitConverter.ToInt32(r, 8).ToString(), server, bypass, url, why };
+  }
+
+  static string Field(byte[] r, ref int at) {
+    if (at + 4 > r.Length) return "";
+    int n = BitConverter.ToInt32(r, at);
+    at += 4;
+    if (n < 0 || at + n > r.Length) { at = r.Length; return ""; }
+    string s = Encoding.ASCII.GetString(r, at, n);
+    at += n;
+    return s;
   }
 
   const int ERROR_INVALID_PARAMETER = 87;
@@ -268,18 +309,22 @@ public static class GtWinInet {
 }
 `;
 
-async function queryProxy(): Promise<WinInetProxy> {
+/** `queryFailure` is set when the API refused and the stored record was decoded instead. */
+async function queryProxy(): Promise<WinInetProxy & { readonly queryFailure: string }> {
   const output = await runWinInet({ op: 'get' });
   const parsed: unknown = JSON.parse(output);
-  if (!Array.isArray(parsed) || parsed.length !== 4) {
+  if (!Array.isArray(parsed) || parsed.length !== 5) {
     throw new SystemProxyError(`Unexpected WinINet proxy reading: ${output}`);
   }
-  const [flags, server, bypass, autoConfigUrl] = parsed.map((value) => String(value ?? ''));
+  const [flags, server, bypass, autoConfigUrl, queryFailure] = parsed.map((value) =>
+    String(value ?? ''),
+  );
   return {
     flags: Number.parseInt(flags ?? '', 10) || PROXY_TYPE_DIRECT,
     server: server ?? '',
     bypass: bypass ?? '',
     autoConfigUrl: autoConfigUrl ?? '',
+    queryFailure: queryFailure ?? '',
   };
 }
 
