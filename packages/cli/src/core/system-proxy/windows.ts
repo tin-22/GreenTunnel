@@ -79,7 +79,7 @@ export class WindowsSystemProxy implements SystemProxyDriver {
       flags:
         PROXY_TYPE_DIRECT | PROXY_TYPE_PROXY | (previous?.autoDetect ? PROXY_TYPE_AUTO_DETECT : 0),
       server: `${settings.host}:${String(settings.port)}`,
-      bypass: settings.bypass.length > 0 ? toBypassList(settings.bypass) : '<local>',
+      bypass: toBypassList(withLocal(settings.bypass)),
       autoConfigUrl: previous?.autoConfigUrl ?? '',
     });
     this.#warnDropped(dropped);
@@ -124,6 +124,20 @@ export class WindowsSystemProxy implements SystemProxyDriver {
       );
     }
   }
+}
+
+/**
+ * `<local>` is how WinINet stores Settings' "Don't use the proxy server for
+ * local (intranet) addresses": it sends every dotless hostname direct. It used
+ * to be written only when the list was otherwise empty, which never happens —
+ * `DEFAULT_BYPASS` is always passed — so the box stayed unticked and local
+ * services reached by machine name (Unity's MCP bridge among them) were sent
+ * to the tunnel, which cannot reach them. Appended, never duplicated.
+ */
+function withLocal(entries: readonly string[]): readonly string[] {
+  return entries.some((entry) => entry.toLowerCase() === '<local>')
+    ? entries
+    : [...entries, '<local>'];
 }
 
 /**
