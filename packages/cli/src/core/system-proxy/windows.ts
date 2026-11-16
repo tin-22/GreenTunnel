@@ -1,3 +1,4 @@
+import { isIPv6 } from 'node:net';
 import type { SystemProxySettings, SystemProxySnapshot } from '../types.js';
 import { SystemProxyError } from '../errors.js';
 import { Logger } from '../logger.js';
@@ -79,7 +80,7 @@ export class WindowsSystemProxy implements SystemProxyDriver {
       flags:
         PROXY_TYPE_DIRECT | PROXY_TYPE_PROXY | (previous?.autoDetect ? PROXY_TYPE_AUTO_DETECT : 0),
       server: `${settings.host}:${String(settings.port)}`,
-      bypass: toBypassList(withLocal(settings.bypass)),
+      bypass: toBypassList(appliedBypass(settings.bypass)),
       autoConfigUrl: previous?.autoConfigUrl ?? '',
     });
     this.#warnDropped(dropped);
@@ -127,6 +128,28 @@ export class WindowsSystemProxy implements SystemProxyDriver {
 }
 
 /**
+ * The bypass list as `apply` writes it: our entries without IPv6 literals, plus
+ * `<local>`. Exported for the tests only.
+ *
+ * IPv6 literals are left out because no spelling of one works everywhere the
+ * list ends up. WinINet rejects a bare `::1` ("The parameter is incorrect"),
+ * and the bracketed `[::1]` it does accept breaks Python's httpx. The Unity
+ * editor copies the system proxy into `NO_PROXY` for every process it launches,
+ * and httpx parses a `[::1]` entry there as a host with port `:1]`.
+ * `httpx.Client()` then throws `InvalidURL` before sending anything. MCP for
+ * Unity's server builds a client on startup, so with the tunnel on it died
+ * immediately and the editor had nothing to connect to. Unity appends its own
+ * `::1` to that variable, so its children still bypass IPv6 loopback, and every
+ * other client reaches local services through `localhost` or `127.0.0.1`.
+ *
+ * Only `apply` filters. `restore` writes back the user's own list exactly as it
+ * was, brackets included.
+ */
+export function appliedBypass(entries: readonly string[]): readonly string[] {
+  return withLocal(entries.filter((entry) => !isIPv6(entry.replace(/^\[(.*)\]$/, '$1'))));
+}
+
+/**
  * `<local>` is how WinINet stores Settings' "Don't use the proxy server for
  * local (intranet) addresses": it sends every dotless hostname direct. It used
  * to be written only when the list was otherwise empty, which never happens —
@@ -141,11 +164,11 @@ function withLocal(entries: readonly string[]): readonly string[] {
 }
 
 /**
- * Join a bypass list the way WinINet accepts it. A bare IPv6 literal — the
- * `::1` in `DEFAULT_BYPASS` — fails the whole write with "The parameter is
- * incorrect"; the bracketed `[::1]` is accepted. v3.0 never saw this because it
- * wrote the registry mirror directly, which validates nothing, so snapshots it
- * took can still hold the bare form and have to be converted on restore too.
+ * Join a bypass list the way WinINet accepts it. A bare IPv6 literal fails the
+ * whole write with "The parameter is incorrect", while the bracketed form is
+ * accepted. `apply` no longer writes IPv6 literals (see `appliedBypass`), so
+ * this matters for restore. v3.0 wrote the registry mirror directly, which
+ * validates nothing, so a snapshot it took can still hold a bare `::1`.
  */
 function toBypassList(entries: readonly string[]): string {
   return entries

@@ -486,6 +486,16 @@ and worked with it off. Each of these cost a wrong theory first.
    `warn` with the API's error. Separately, the option union must be 8 bytes but
    only 4-byte aligned: a `long` member made it 16 bytes on x86, and a 32-bit
    PowerShell then read every option back as zero.
+7. **The bypass list leaks into other programs' `NO_PROXY`.** The Unity editor
+   converts the system proxy into `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for every
+   process it launches, and Python's httpx reads a `[::1]` there as a host with
+   port `:1]`. `httpx.Client()` throws `InvalidURL`, so MCP for Unity's server
+   died at startup and the editor reported only `[WebSocket] Connection failed`.
+   The real error is in `Library/MCPForUnity/Logs/server-launch-*.log`. A bare
+   `::1` would suit httpx, but WinINet rejects it (item 2), so `apply` writes no
+   IPv6 literal at all (`appliedBypass` in `windows.ts`). Unity appends its own
+   `::1`. Restore still writes the user's own list unchanged. Unity logs the
+   variables it passes in `%LOCALAPPDATA%\Unity\Editor\upm.log`.
 
 ## Verified
 
